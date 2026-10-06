@@ -9,6 +9,7 @@ import {
 import { MessagePlugin } from 'tdesign-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
+import { RevisionConflictError } from '@/services/revision'
 import { useGovernanceStore } from '@/stores/governance'
 
 const store = useGovernanceStore()
@@ -45,9 +46,31 @@ const execute = async (): Promise<void> => {
     await MessagePlugin.error('版本、回滚原因、影响范围和证据编号不能为空')
     return
   }
-  store.executeRollback(form.releaseId, form.reason, form.scope, form.evidence)
-  rollbackVisible.value = false
-  await MessagePlugin.success('回滚指令已记录，请继续执行结果验证')
+  const existing = store.data.rollbacks.find((item) => item.releaseId === form.releaseId)
+  if (existing) {
+    await MessagePlugin.warning(`该发布已在 r${existing.revision} 回滚，重放不会重复生成记录`)
+    rollbackVisible.value = false
+    return
+  }
+  try {
+    const record = store.executeRollback(
+      form.releaseId,
+      form.reason,
+      form.scope,
+      form.evidence,
+      store.data.currentRevision,
+    )
+    rollbackVisible.value = false
+    await MessagePlugin.success(
+      `回滚指令已记录为 r${record?.revision}，候选保留，下游已按回滚后契约重新对账`,
+    )
+  } catch (error) {
+    if (error instanceof RevisionConflictError) {
+      await MessagePlugin.error(`${error.message}，请刷新后基于最新修订执行回滚`)
+    } else {
+      throw error
+    }
+  }
 }
 
 const openVerify = (rollbackId: string): void => {
@@ -63,7 +86,7 @@ const verify = async (): Promise<void> => {
   }
   store.verifyRollback(selectedRollbackId.value, verifyForm.evidence)
   verifyVisible.value = false
-  await MessagePlugin.success('回滚验证结果已记录')
+  await MessagePlugin.success('回滚验证结果已记录，下游迁移状态已再次对账')
 }
 </script>
 
@@ -79,7 +102,9 @@ const verify = async (): Promise<void> => {
       <div class="toolbar-row">
         <div>
           <strong>发布回滚台账</strong>
-          <p class="page-description">回滚是独立审计记录，不删除原发布版本和下游迁移确认。</p>
+          <p class="page-description">
+            回滚是独立审计记录且产生新修订号：不删除原发布与候选，旧确认/审批失效，下游按回滚后契约重新对账。
+          </p>
         </div>
         <div class="filter-actions">
           <t-button theme="danger" @click="openRollback">
@@ -120,8 +145,12 @@ const verify = async (): Promise<void> => {
           <div class="rollback-main">
             <div class="rollback-head">
               <div>
-                <strong>{{ record.version }}</strong>
+                <strong>{{ record.version }} · r{{ record.revision }}</strong>
                 <span>{{ record.release?.title ?? '历史发布版本' }}</span>
+                <small v-if="record.release">
+                  候选已保留（{{ record.release.status === 'rolled_back' ? '回滚态' : record.release.status }}），
+                  确认与审批按 r{{ record.revision }} 重新核对
+                </small>
               </div>
               <StatusTag :value="record.status" />
             </div>
@@ -138,6 +167,19 @@ const verify = async (): Promise<void> => {
               <div>
                 <dt>执行时间</dt>
                 <dd>{{ new Date(record.createdAt).toLocaleString('zh-CN') }}</dd>
+              </div>
+              <div>
+                <dt>修订号</dt>
+                <dd>r{{ record.revision }}</dd>
+              </div>
+              <div>
+                <dt>对账状态</dt>
+                <dd>
+                  <StatusTag :value="record.status" />
+                  <small v-if="record.reconciledAt">
+                    {{ new Date(record.reconciledAt).toLocaleString('zh-CN') }} 已完成重新对账
+                  </small>
+                </dd>
               </div>
               <div>
                 <dt>验证证据</dt>
@@ -291,6 +333,17 @@ const verify = async (): Promise<void> => {
 .rollback-head span {
   color: #737e90;
   font-size: 11px;
+}
+
+.rollback-head small {
+  color: #c46a00;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.rollback-main dl small {
+  color: #0f8a62;
+  font-size: 10px;
 }
 
 .rollback-main > p {

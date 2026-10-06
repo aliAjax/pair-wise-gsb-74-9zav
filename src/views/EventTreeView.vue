@@ -21,10 +21,13 @@ import type {
   PropertyType,
 } from '@/models/domain'
 import { createId } from '@/services/repository'
+import { RevisionConflictError } from '@/services/revision'
 import { useGovernanceStore } from '@/stores/governance'
 
 const store = useGovernanceStore()
 const queryClient = useQueryClient()
+/** 编辑表单打开时基于的修订号；保存时若已落后于其他窗口的修订则拒绝提交 */
+const formRevision = ref(store.data.currentRevision)
 
 const filters = reactive({
   keyword: '',
@@ -141,6 +144,7 @@ const invalidate = async (): Promise<void> => {
 const openEventEditor = (): void => {
   if (!selectedEvent.value) return
   Object.assign(eventForm, structuredClone(selectedEvent.value))
+  formRevision.value = store.data.currentRevision
   eventEditorVisible.value = true
 }
 
@@ -161,7 +165,16 @@ const addEvent = (): void => {
     downstreamDependencyIds: [],
     updatedAt: '',
   } satisfies EventDefinition)
+  formRevision.value = store.data.currentRevision
   eventEditorVisible.value = true
+}
+
+const guardRevision = (error: unknown): boolean => {
+  if (error instanceof RevisionConflictError) {
+    void MessagePlugin.error(`${error.message}，请重新打开编辑器基于最新修订修改`)
+    return true
+  }
+  return false
 }
 
 const saveEvent = async (): Promise<void> => {
@@ -183,11 +196,16 @@ const saveEvent = async (): Promise<void> => {
     id: eventForm.id || createId('evt'),
     updatedAt: new Date().toISOString(),
   }
-  store.saveEvent(saved)
-  selectedId.value = saved.id
-  eventEditorVisible.value = false
-  await invalidate()
-  await MessagePlugin.success('事件契约已保存')
+  try {
+    const revision = store.saveEvent(saved, formRevision.value)
+    selectedId.value = saved.id
+    formRevision.value = revision
+    eventEditorVisible.value = false
+    await invalidate()
+    await MessagePlugin.success(`事件契约已保存，修订号推进到 r${revision}`)
+  } catch (error) {
+    if (!guardRevision(error)) throw error
+  }
 }
 
 const openPropertyEditor = (property?: EventProperty): void => {
@@ -211,6 +229,7 @@ const openPropertyEditor = (property?: EventProperty): void => {
           lineageSourceId: '',
         } satisfies EventProperty,
   )
+  formRevision.value = store.data.currentRevision
   propertyEditorVisible.value = true
 }
 
@@ -231,10 +250,15 @@ const saveProperty = async (): Promise<void> => {
     id: propertyForm.id || createId('prop'),
     eventId: selectedEvent.value.id,
   }
-  store.saveProperty(selectedEvent.value.id, saved)
-  propertyEditorVisible.value = false
-  await invalidate()
-  await MessagePlugin.success('属性已保存')
+  try {
+    const revision = store.saveProperty(selectedEvent.value.id, saved, formRevision.value)
+    formRevision.value = revision
+    propertyEditorVisible.value = false
+    await invalidate()
+    await MessagePlugin.success(`属性已保存，修订号 r${revision}`)
+  } catch (error) {
+    if (!guardRevision(error)) throw error
+  }
 }
 
 const openRuleEditor = (rule?: PlatformRule): void => {
@@ -254,6 +278,7 @@ const openRuleEditor = (rule?: PlatformRule): void => {
           note: '',
         } satisfies PlatformRule,
   )
+  formRevision.value = store.data.currentRevision
   platformEditorVisible.value = true
 }
 
@@ -262,26 +287,50 @@ const saveRule = async (): Promise<void> => {
     await MessagePlugin.error('平台触发时机和负责人不能为空')
     return
   }
-  store.savePlatformRule(selectedEvent.value.id, {
-    ...structuredClone(platformForm),
-    id: platformForm.id || createId('rule'),
-    eventId: selectedEvent.value.id,
-  })
-  platformEditorVisible.value = false
-  await invalidate()
-  await MessagePlugin.success('平台规则已保存')
+  try {
+    const revision = store.savePlatformRule(
+      selectedEvent.value.id,
+      {
+        ...structuredClone(platformForm),
+        id: platformForm.id || createId('rule'),
+        eventId: selectedEvent.value.id,
+      },
+      formRevision.value,
+    )
+    formRevision.value = revision
+    platformEditorVisible.value = false
+    await invalidate()
+    await MessagePlugin.success(`平台规则已保存，修订号 r${revision}`)
+  } catch (error) {
+    if (!guardRevision(error)) throw error
+  }
 }
 
 const removeProperty = async (propertyId: string): Promise<void> => {
   if (!selectedEvent.value) return
-  store.deleteProperty(selectedEvent.value.id, propertyId)
-  await invalidate()
-  await MessagePlugin.warning('属性已标记删除，仍引用它的下游依赖会进入迁移清单')
+  try {
+    const revision = store.deleteProperty(
+      selectedEvent.value.id,
+      propertyId,
+      store.data.currentRevision,
+    )
+    formRevision.value = revision
+    await invalidate()
+    await MessagePlugin.warning(
+      `属性已标记删除（r${revision}），仍引用它的下游依赖会进入迁移清单`,
+    )
+  } catch (error) {
+    if (!guardRevision(error)) throw error
+  }
 }
 
 const toggleProperty = (row: EventProperty, value: boolean): void => {
   if (!selectedEvent.value) return
-  store.saveProperty(selectedEvent.value.id, { ...row, required: value })
+  try {
+    store.saveProperty(selectedEvent.value.id, { ...row, required: value }, store.data.currentRevision)
+  } catch (error) {
+    if (!guardRevision(error)) throw error
+  }
 }
 
 const updateRequired = (row: EventProperty, value: unknown): void => {
@@ -316,8 +365,24 @@ const setPlatform = (value: unknown): void => {
     <PageHeader
       eyebrow="契约目录"
       title="事件树与契约编辑"
-      description="按业务域维护事件、属性、枚举、多端触发规则和负责人，所有编辑均进入版本差异。"
+      description="按业务域维护事件、属性、枚举、多端触发规则和负责人；事件、属性或平台规则变化即推进修订号并使发布候选的旧确认与审批失效。"
     />
+
+    <section v-if="store.externalUpdateAt" class="panel sync-banner">
+      <RefreshIcon />
+      <div>
+        <strong>其他浏览器窗口已写入更新修订（当前 r{{ store.data.currentRevision }}）</strong>
+        <span>本窗口编辑器基于的旧修订提交会被拒绝，已同步最新契约，请重新打开编辑器。</span>
+      </div>
+    </section>
+
+    <section class="panel revision-strip">
+      <span>当前契约修订号</span>
+      <strong>r{{ store.data.currentRevision }}</strong>
+      <span class="muted">
+        多窗口同时编辑时，只有基于当前修订号的保存才会生效；迟到的旧修订一律拒绝。
+      </span>
+    </section>
 
     <section class="panel filter-panel">
       <div class="toolbar-row">
@@ -670,6 +735,55 @@ const setPlatform = (value: unknown): void => {
 </template>
 
 <style scoped>
+.sync-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 12px 16px;
+  border: 1px solid #bcd3f2;
+  border-radius: 6px;
+  background: #f2f7ff;
+}
+
+.sync-banner svg {
+  color: #1264c5;
+}
+
+.sync-banner > div {
+  display: grid;
+  gap: 3px;
+}
+
+.sync-banner span {
+  color: #5d6b82;
+  font-size: 12px;
+}
+
+.revision-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px 16px;
+  border-radius: 6px;
+}
+
+.revision-strip span:first-child {
+  color: #6d788a;
+  font-size: 12px;
+}
+
+.revision-strip strong {
+  font-family: monospace;
+  font-size: 15px;
+  color: #1264c5;
+}
+
+.revision-strip .muted {
+  font-size: 11px;
+}
+
 .filter-panel {
   padding: 14px 16px;
 }

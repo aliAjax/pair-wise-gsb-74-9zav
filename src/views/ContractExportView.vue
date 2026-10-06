@@ -25,10 +25,52 @@ watch(includeDeprecated, () => {
   )
 })
 
+const staleReleases = computed(() =>
+  store.data.releases
+    .filter(
+      (release) =>
+        release.status === 'reviewing' &&
+        release.staleReason &&
+        release.eventIds.some((eventId) => selectedEventIds.value.includes(eventId)),
+    )
+    .map((release) => ({
+      release,
+      staleConfirmations: release.migrationConfirmations.filter((item) => item.invalidatedAt),
+      staleApprovals: release.approvals.filter((item) => item.invalidatedAt),
+    })),
+)
+
 const markdown = computed(() => {
   const events = store.data.events.filter((event) => selectedEventIds.value.includes(event.id))
   return [
     `# 埋点事件契约 ${store.data.currentVersion}`,
+    '',
+    `- 当前修订号：r${store.data.currentRevision}`,
+    `- 导出时间：${new Date().toISOString()}`,
+    ...(staleReleases.value.length
+      ? [
+          '',
+          '## 修订失效说明',
+          '',
+          ...staleReleases.value.flatMap(({ release, staleConfirmations, staleApprovals }) => [
+            `### 候选 ${release.version}（基线 r${release.baseRevision} → 当前 r${release.contractRevision}）`,
+            '',
+            `- 失效原因：${release.staleReason}`,
+            ...staleConfirmations.map(
+              (item) =>
+                `- 迁移确认已失效：${
+                  store.data.dependencies.find((dep) => dep.id === item.dependencyId)?.name ??
+                  item.dependencyId
+                }（${item.reviewer}）— ${item.invalidatedReason}`,
+            ),
+            ...staleApprovals.map(
+              (item) =>
+                `- 审批已失效：${item.actor}（${item.role}）— ${item.invalidatedReason}`,
+            ),
+            '',
+          ]),
+        ]
+      : []),
     '',
     ...events.flatMap((event) => [
       `## ${event.displayName} (\`${event.key}\`)`,
@@ -76,7 +118,7 @@ const download = async (): Promise<void> => {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = `event-contract-${store.data.currentVersion}.${extension}`
+  anchor.download = `event-contract-${store.data.currentVersion}-r${store.data.currentRevision}.${extension}`
   anchor.click()
   URL.revokeObjectURL(url)
   await MessagePlugin.success('契约文件已导出')
@@ -96,6 +138,28 @@ const setExportSelection = (eventId: string, checked: unknown): void => {
       title="契约导出"
       description="选择事件和格式，生成可直接交付给客户端、数据与服务团队的事件契约文件。"
     />
+
+    <section v-if="staleReleases.length" class="panel stale-note">
+      <h3>修订失效说明（r{{ store.data.currentRevision }}）</h3>
+      <article v-for="{ release, staleConfirmations, staleApprovals } in staleReleases" :key="release.id">
+        <strong>
+          {{ release.version }}：候选 r{{ release.contractRevision }}
+          （基线 r{{ release.baseRevision }}）
+        </strong>
+        <p>{{ release.staleReason }}</p>
+        <ul>
+          <li v-for="item in staleConfirmations" :key="item.id">
+            迁移确认失效：{{
+              store.data.dependencies.find((dep) => dep.id === item.dependencyId)?.name ??
+              item.dependencyId
+            }}（{{ item.reviewer }}）— {{ item.invalidatedReason }}
+          </li>
+          <li v-for="item in staleApprovals" :key="item.id">
+            审批失效：{{ item.actor }}（{{ item.role }}）— {{ item.invalidatedReason }}
+          </li>
+        </ul>
+      </article>
+    </section>
 
     <div class="export-layout">
       <aside class="panel export-options">
@@ -157,6 +221,43 @@ const setExportSelection = (eventId: string, checked: unknown): void => {
 </template>
 
 <style scoped>
+.stale-note {
+  margin-bottom: 16px;
+  padding: 14px 18px;
+  border: 1px solid #f0d5ad;
+  background: #fff8ef;
+}
+
+.stale-note h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.stale-note article {
+  display: grid;
+  gap: 5px;
+  padding: 8px 0;
+  border-top: 1px solid #f3e4cc;
+}
+
+.stale-note article:first-of-type {
+  border-top: 0;
+}
+
+.stale-note p {
+  margin: 0;
+  color: #8a5a22;
+  font-size: 12px;
+}
+
+.stale-note ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #a04f12;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
 .export-layout {
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);

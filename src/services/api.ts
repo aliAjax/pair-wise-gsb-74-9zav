@@ -24,6 +24,9 @@ export interface DashboardPayload {
   validationIssueCount: number
   criticalIssueCount: number
   currentRelease: ReleaseCandidate | null
+  currentRevision: number
+  staleEvidenceCount: number
+  staleReleaseCount: number
 }
 
 export interface LineagePayload {
@@ -39,6 +42,18 @@ const localAdapter: AxiosAdapter = async (config) => {
     const issues = validateGovernance(state)
     const currentRelease =
       state.releases.find((release) => release.status === 'reviewing') ?? state.releases[0] ?? null
+    const staleReleaseCount = state.releases.filter(
+      (release) => release.status === 'reviewing' && Boolean(release.staleReason),
+    ).length
+    const staleEvidenceCount = state.releases
+      .filter((release) => release.status === 'reviewing')
+      .reduce(
+        (total, release) =>
+          total +
+          release.migrationConfirmations.filter((item) => item.invalidatedAt).length +
+          release.approvals.filter((item) => item.invalidatedAt).length,
+        0,
+      )
     const data: DashboardPayload = {
       eventCount: state.events.length,
       activeEventCount: state.events.filter((event) =>
@@ -49,10 +64,15 @@ const localAdapter: AxiosAdapter = async (config) => {
       ).length,
       dependencyCount: state.dependencies.length,
       pendingMigrations:
-        currentRelease?.migrationConfirmations.filter((item) => item.status === 'pending').length ?? 0,
+        currentRelease?.migrationConfirmations.filter(
+          (item) => item.status !== 'confirmed' || item.invalidatedAt,
+        ).length ?? 0,
       validationIssueCount: issues.length,
       criticalIssueCount: issues.filter((issue) => issue.severity === 'critical').length,
       currentRelease,
+      currentRevision: state.currentRevision,
+      staleEvidenceCount,
+      staleReleaseCount,
     }
     return {
       data,

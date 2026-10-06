@@ -333,12 +333,18 @@ export const releaseReadiness = (
   release: ReleaseCandidate,
   issues: ValidationIssue[],
 ): number => {
-  const migrationTotal = release.migrationConfirmations.length
-  const migrationDone = release.migrationConfirmations.filter(
-    (item) => item.status === 'confirmed',
+  const scoped = new Set(release.affectedDependencyIds)
+  const activeConfirmations = release.migrationConfirmations.filter((item) =>
+    scoped.has(item.dependencyId),
+  )
+  const migrationTotal = activeConfirmations.length
+  const migrationDone = activeConfirmations.filter(
+    (item) => item.status === 'confirmed' && !item.invalidatedAt,
   ).length
   const approvalTotal = release.approvals.length
-  const approvalDone = release.approvals.filter((item) => item.status === 'approved').length
+  const approvalDone = release.approvals.filter(
+    (item) => item.status === 'approved' && !item.invalidatedAt,
+  ).length
   const issuePenalty = Math.min(
     40,
     issues.filter((issue) => release.eventIds.includes(issue.entityId)).length * 8,

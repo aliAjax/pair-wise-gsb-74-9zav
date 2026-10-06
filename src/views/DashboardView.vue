@@ -12,6 +12,7 @@ import {
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useDashboardQuery, useValidationQuery } from '@/composables/useGovernanceQueries'
+import { isApprovalValid, isConfirmationValid } from '@/services/revision'
 import { releaseReadiness } from '@/services/selectors'
 import { useGovernanceStore } from '@/stores/governance'
 
@@ -28,10 +29,15 @@ const readiness = computed(() =>
 
 const pendingMigrations = computed(
   () =>
-    currentRelease.value?.migrationConfirmations.filter((item) => item.status !== 'confirmed') ?? [],
+    currentRelease.value?.migrationConfirmations.filter((item) => !isConfirmationValid(item)) ?? [],
 )
 const pendingApprovals = computed(
-  () => currentRelease.value?.approvals.filter((item) => item.status === 'pending') ?? [],
+  () => currentRelease.value?.approvals.filter((item) => !isApprovalValid(item)) ?? [],
+)
+const staleEvidenceCount = computed(
+  () =>
+    (currentRelease.value?.migrationConfirmations.filter((item) => item.invalidatedAt).length ?? 0) +
+    (currentRelease.value?.approvals.filter((item) => item.invalidatedAt).length ?? 0),
 )
 </script>
 
@@ -56,7 +62,21 @@ const pendingApprovals = computed(
       <div class="metric">
         <div class="metric-label">下游依赖</div>
         <div class="metric-value">{{ dashboard?.dependencyCount ?? store.data.dependencies.length }}</div>
-        <div class="metric-note">{{ dashboard?.pendingMigrations ?? 0 }} 个待迁移确认</div>
+        <div class="metric-note">{{ dashboard?.pendingMigrations ?? 0 }} 个待迁移重新核对</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">修订与失效</div>
+        <div class="metric-value" :class="{ 'danger-text': staleEvidenceCount > 0 }">
+          r{{ dashboard?.currentRevision ?? store.data.currentRevision }}
+        </div>
+        <div class="metric-note">
+          {{ dashboard?.staleEvidenceCount ?? staleEvidenceCount }} 项确认/审批已失效
+        </div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">发布就绪度</div>
+        <div class="metric-value">{{ readiness }}%</div>
+        <div class="metric-note">{{ currentRelease?.version ?? '暂无评审版本' }}</div>
       </div>
       <div class="metric">
         <div class="metric-label">契约问题</div>
@@ -79,14 +99,20 @@ const pendingApprovals = computed(
           <StatusTag v-if="currentRelease" :value="currentRelease.status" />
         </div>
         <template v-if="currentRelease">
+          <div v-if="currentRelease.staleReason && currentRelease.status === 'reviewing'" class="stale-strip">
+            r{{ currentRelease.contractRevision }} 候选已过期：{{ currentRelease.staleReason }}
+          </div>
           <div class="release-summary">
             <div>
               <span>版本</span>
               <strong>{{ currentRelease.version }}</strong>
             </div>
             <div>
-              <span>事件</span>
-              <strong>{{ currentRelease.eventIds.length }}</strong>
+              <span>修订号</span>
+              <strong>
+                r{{ currentRelease.frozenRevision ?? currentRelease.contractRevision }}
+                {{ currentRelease.frozenRevision ? '（已冻结）' : '' }}
+              </strong>
             </div>
             <div>
               <span>下游依赖</span>
@@ -230,6 +256,17 @@ const pendingApprovals = computed(
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1px;
   background: #e6e9ee;
+}
+
+.stale-strip {
+  margin: 12px 14px 0;
+  padding: 8px 10px;
+  border: 1px solid #f0d5ad;
+  border-radius: 4px;
+  color: #a04f12;
+  background: #fff8ef;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .release-summary > div {

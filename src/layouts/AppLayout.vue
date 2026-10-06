@@ -69,7 +69,7 @@ const reset = (): void => {
       <div class="sidebar-foot">
         <HistoryIcon />
         <div>
-          <span>本地持久化</span>
+          <span>本地持久化 · 修订号 r{{ store.data.currentRevision }}</span>
           <strong>当前版本 {{ store.data.currentVersion }}</strong>
         </div>
       </div>
