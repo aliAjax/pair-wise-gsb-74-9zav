@@ -9,6 +9,7 @@ import {
 import { MessagePlugin } from 'tdesign-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
+import { reportMutation } from '@/composables/useMutationResult'
 import { useGovernanceStore } from '@/stores/governance'
 
 const store = useGovernanceStore()
@@ -32,6 +33,26 @@ const rollbackRecords = computed(() =>
   })),
 )
 
+const revisionLedger = computed(() =>
+  [...store.data.revisions]
+    .sort((a, b) => b.revision - a.revision)
+    .slice(0, 12)
+    .map((entry) => ({
+      ...entry,
+      eventKey:
+        entry.eventId
+          ? store.data.events.find((event) => event.id === entry.eventId)?.key ?? entry.eventId
+          : undefined,
+    })),
+)
+
+const sourceLabel: Record<string, string> = {
+  event: '事件',
+  property: '属性',
+  platform_rule: '平台规则',
+  rollback: '回滚',
+}
+
 const openRollback = (): void => {
   form.releaseId = store.data.releases.find((release) => release.status === 'published')?.id ?? ''
   form.reason = ''
@@ -45,9 +66,10 @@ const execute = async (): Promise<void> => {
     await MessagePlugin.error('版本、回滚原因、影响范围和证据编号不能为空')
     return
   }
-  store.executeRollback(form.releaseId, form.reason, form.scope, form.evidence)
+  const result = store.executeRollback(form.releaseId, form.reason, form.scope, form.evidence)
+  if (!(await reportMutation(result))) return
   rollbackVisible.value = false
-  await MessagePlugin.success('回滚指令已记录，请继续执行结果验证')
+  await MessagePlugin.success(`回滚已记录（修订 r${store.data.headRevision}），下游迁移状态已重新对账，请继续执行结果验证`)
 }
 
 const openVerify = (rollbackId: string): void => {
@@ -61,7 +83,8 @@ const verify = async (): Promise<void> => {
     await MessagePlugin.error('验证证据不能为空')
     return
   }
-  store.verifyRollback(selectedRollbackId.value, verifyForm.evidence)
+  const result = store.verifyRollback(selectedRollbackId.value, verifyForm.evidence)
+  if (!(await reportMutation(result))) return
   verifyVisible.value = false
   await MessagePlugin.success('回滚验证结果已记录')
 }
@@ -120,12 +143,25 @@ const verify = async (): Promise<void> => {
           <div class="rollback-main">
             <div class="rollback-head">
               <div>
-                <strong>{{ record.version }}</strong>
+                <strong>{{ record.version }} <span class="revision-chip">r{{ record.revision }}</span></strong>
                 <span>{{ record.release?.title ?? '历史发布版本' }}</span>
               </div>
               <StatusTag :value="record.status" />
             </div>
             <p>{{ record.reason }}</p>
+            <section v-if="record.reconciliation.length > 0" class="reconcile-panel">
+              <h4>下游迁移状态按回滚后契约重新对账</h4>
+              <ul>
+                <li v-for="item in record.reconciliation" :key="item.dependencyId">
+                  <StatusTag :value="item.status" />
+                  <strong>{{ item.dependencyName }}</strong>
+                  <span :class="{ matched: item.matched, unmatched: !item.matched }">
+                    {{ item.matched ? '核对一致' : '需继续迁移' }}
+                  </span>
+                  <small>{{ item.detail }}</small>
+                </li>
+              </ul>
+            </section>
             <dl>
               <div>
                 <dt>影响范围</dt>
@@ -159,17 +195,37 @@ const verify = async (): Promise<void> => {
       </div>
     </section>
 
+    <section class="panel revision-ledger">
+      <div class="panel-header">
+        <h2 class="panel-title">修订台账</h2>
+        <span class="muted">事件、属性、平台规则修订与回滚共用同一单调号段，当前 r{{ store.data.headRevision }}</span>
+      </div>
+      <div class="ledger-list">
+        <article v-for="entry in revisionLedger" :key="entry.revision" class="ledger-item" :class="{ rollback: entry.kind === 'rollback' }">
+          <span class="ledger-rev">r{{ entry.revision }}</span>
+          <StatusTag :value="entry.kind === 'rollback' ? 'rolled_back' : 'reviewing'" />
+          <div class="ledger-body">
+            <strong>{{ entry.summary }}</strong>
+            <span>{{ sourceLabel[entry.source] }}<template v-if="entry.eventKey"> · {{ entry.eventKey }}</template> · {{ entry.actor }}</span>
+            <small>{{ new Date(entry.createdAt).toLocaleString('zh-CN') }}</small>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <t-dialog v-model:visible="rollbackVisible" header="执行契约回滚" width="680px" :footer="false">
       <div class="editor-form">
         <div class="field field-wide">
-          <label>回滚目标版本</label>
+          <label>回滚目标版本（仅已发布）</label>
           <t-select
             v-model="form.releaseId"
             :options="
-              store.data.releases.map((release) => ({
-                label: `${release.version} ${release.title}`,
-                value: release.id,
-              }))
+              store.data.releases
+                .filter((release) => release.status === 'published')
+                .map((release) => ({
+                  label: `${release.version} ${release.title}（冻结 r${release.frozenRevision ?? '?'}）`,
+                  value: release.id,
+                }))
             "
           />
         </div>
@@ -277,6 +333,59 @@ const verify = async (): Promise<void> => {
   gap: 12px;
 }
 
+.revision-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  color: #1264c5;
+  background: #e8f1fc;
+  font-family: monospace;
+  font-size: 11px;
+  vertical-align: middle;
+}
+
+.reconcile-panel {
+  padding: 12px 14px;
+  border: 1px solid #e3dcc9;
+  border-radius: 6px;
+  background: #fdfaf2;
+}
+
+.reconcile-panel h4 {
+  margin: 0 0 9px;
+  color: #8a6116;
+  font-size: 12px;
+}
+
+.reconcile-panel ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reconcile-panel li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.reconcile-panel li small {
+  grid-column: 2 / -1;
+  color: #7a6a48;
+}
+
+.reconcile-panel .matched {
+  color: #0e7a58;
+}
+
+.reconcile-panel .unmatched {
+  color: #b42318;
+}
+
 .rollback-head {
   display: flex;
   justify-content: space-between;
@@ -323,6 +432,53 @@ const verify = async (): Promise<void> => {
 
 .rollback-main :deep(.t-button) {
   justify-self: start;
+}
+
+.revision-ledger .ledger-list {
+  display: grid;
+}
+
+.ledger-item {
+  display: grid;
+  grid-template-columns: 56px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #eef0f3;
+}
+
+.ledger-item:last-child {
+  border-bottom: 0;
+}
+
+.ledger-rev {
+  font-family: monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1264c5;
+}
+
+.ledger-item.rollback .ledger-rev {
+  color: #b42318;
+}
+
+.ledger-body {
+  display: grid;
+  gap: 3px;
+}
+
+.ledger-body strong {
+  font-size: 12px;
+}
+
+.ledger-body span {
+  color: #6d788b;
+  font-size: 11px;
+}
+
+.ledger-body small {
+  color: #98a1af;
+  font-size: 10px;
 }
 
 .dialog-footer {

@@ -21,6 +21,8 @@ export interface DashboardPayload {
   draftEventCount: number
   dependencyCount: number
   pendingMigrations: number
+  invalidatedEvidenceCount: number
+  headRevision: number
   validationIssueCount: number
   criticalIssueCount: number
   currentRelease: ReleaseCandidate | null
@@ -49,7 +51,17 @@ const localAdapter: AxiosAdapter = async (config) => {
       ).length,
       dependencyCount: state.dependencies.length,
       pendingMigrations:
-        currentRelease?.migrationConfirmations.filter((item) => item.status === 'pending').length ?? 0,
+        currentRelease?.migrationConfirmations.filter(
+          (item) =>
+            currentRelease.affectedDependencyIds.includes(item.dependencyId) &&
+            item.status !== 'confirmed',
+        ).length ?? 0,
+      invalidatedEvidenceCount: currentRelease
+        ? currentRelease.migrationConfirmations.filter((item) => item.status === 'invalidated')
+            .length +
+          currentRelease.approvals.filter((item) => item.status === 'invalidated').length
+        : 0,
+      headRevision: state.headRevision,
       validationIssueCount: issues.length,
       criticalIssueCount: issues.filter((issue) => issue.severity === 'critical').length,
       currentRelease,

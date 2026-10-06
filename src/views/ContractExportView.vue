@@ -25,10 +25,57 @@ watch(includeDeprecated, () => {
   )
 })
 
+const activeReview = computed(() =>
+  store.data.releases.find((release) => release.status === 'reviewing'),
+)
+
 const markdown = computed(() => {
   const events = store.data.events.filter((event) => selectedEventIds.value.includes(event.id))
+  const review = activeReview.value
+  const reviewBlock = review
+    ? [
+        '---',
+        '',
+        `## 发布候选 ${review.version}`,
+        '',
+        `- 基准修订：r${review.baseRevision}，范围修订：r${review.scopeRevision}，当前修订：r${store.data.headRevision}`,
+        review.staleReason?.scopeStale
+          ? `- 失效原因：${review.staleReason.reason}`
+          : '- 候选差异与当前修订一致',
+        '',
+        '### 迁移确认与失效原因',
+        '',
+        '| 下游依赖 | 状态 | 修订 | 失效原因 |',
+        '| --- | --- | --- | --- |',
+        ...review.migrationConfirmations.map((confirmation) =>
+          `| ${
+            store.data.dependencies.find((dependency) => dependency.id === confirmation.dependencyId)
+              ?.name ?? confirmation.dependencyId
+          } | ${confirmation.status} | r${confirmation.revision ?? '-'} | ${
+            confirmation.status === 'invalidated' ? confirmation.invalidatedReason ?? '' : '-'
+          } |`,
+        ),
+        '',
+        '### 四角色审批与失效原因',
+        '',
+        '| 角色 | 审批人 | 状态 | 修订 | 失效原因 |',
+        '| --- | --- | --- | --- | --- |',
+        ...review.approvals.map((approval) =>
+          `| ${
+            { data: '数据负责人', product: '产品负责人', client: '客户端负责人', qa: '测试负责人' }[
+              approval.role
+            ]
+          } | ${approval.actor} | ${approval.status} | r${approval.revision ?? '-'} | ${
+            approval.status === 'invalidated' ? approval.invalidatedReason ?? '' : '-'
+          } |`,
+        ),
+        '',
+      ]
+    : []
   return [
     `# 埋点事件契约 ${store.data.currentVersion}`,
+    '',
+    `> 当前修订号：r${store.data.headRevision}　导出时间：${new Date().toISOString()}`,
     '',
     ...events.flatMap((event) => [
       `## ${event.displayName} (\`${event.key}\`)`,
@@ -55,6 +102,7 @@ const markdown = computed(() => {
       ),
       '',
     ]),
+    ...reviewBlock,
   ].join('\n')
 })
 
@@ -76,7 +124,7 @@ const download = async (): Promise<void> => {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = `event-contract-${store.data.currentVersion}.${extension}`
+  anchor.download = `event-contract-r${store.data.headRevision}.${extension}`
   anchor.click()
   URL.revokeObjectURL(url)
   await MessagePlugin.success('契约文件已导出')
@@ -101,7 +149,7 @@ const setExportSelection = (eventId: string, checked: unknown): void => {
       <aside class="panel export-options">
         <div class="panel-header">
           <h2 class="panel-title">导出范围</h2>
-          <span class="muted">{{ selectedEventIds.length }} 个事件</span>
+          <span class="muted">{{ selectedEventIds.length }} 个事件 · r{{ store.data.headRevision }}</span>
         </div>
         <div class="format-options">
           <label>

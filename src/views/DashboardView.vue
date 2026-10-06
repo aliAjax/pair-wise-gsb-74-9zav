@@ -28,10 +28,22 @@ const readiness = computed(() =>
 
 const pendingMigrations = computed(
   () =>
-    currentRelease.value?.migrationConfirmations.filter((item) => item.status !== 'confirmed') ?? [],
+    currentRelease.value?.migrationConfirmations.filter(
+      (item) =>
+        currentRelease.value?.affectedDependencyIds.includes(item.dependencyId) &&
+        item.status !== 'confirmed',
+    ) ?? [],
 )
+const staleEvidenceCount = computed(() => {
+  if (!currentRelease.value) return 0
+  return (
+    currentRelease.value.migrationConfirmations.filter((item) => item.status === 'invalidated')
+      .length +
+    currentRelease.value.approvals.filter((item) => item.status === 'invalidated').length
+  )
+})
 const pendingApprovals = computed(
-  () => currentRelease.value?.approvals.filter((item) => item.status === 'pending') ?? [],
+  () => currentRelease.value?.approvals.filter((item) => item.status !== 'approved') ?? [],
 )
 </script>
 
@@ -68,7 +80,9 @@ const pendingApprovals = computed(
       <div class="metric">
         <div class="metric-label">发布就绪度</div>
         <div class="metric-value">{{ readiness }}%</div>
-        <div class="metric-note">{{ currentRelease?.version ?? '暂无评审版本' }}</div>
+        <div class="metric-note">
+          {{ currentRelease?.version ?? '暂无评审版本' }} · r{{ store.data.headRevision }}
+        </div>
       </div>
     </div>
 
@@ -85,8 +99,13 @@ const pendingApprovals = computed(
               <strong>{{ currentRelease.version }}</strong>
             </div>
             <div>
-              <span>事件</span>
-              <strong>{{ currentRelease.eventIds.length }}</strong>
+              <span>修订号</span>
+              <strong>
+                r{{ currentRelease.scopeRevision }}
+                <small v-if="currentRelease.frozenRevision" class="frozen-note">
+                  冻结 r{{ currentRelease.frozenRevision }}
+                </small>
+              </strong>
             </div>
             <div>
               <span>下游依赖</span>
@@ -96,6 +115,12 @@ const pendingApprovals = computed(
               <span>契约差异</span>
               <strong>{{ currentRelease.differences.length }}</strong>
             </div>
+          </div>
+          <div v-if="staleEvidenceCount > 0" class="stale-alert">
+            <ErrorCircleIcon />
+            <span>
+              有 {{ staleEvidenceCount }} 项迁移确认/审批因契约后续修订已失效，相关下游重新核对后才能发布。
+            </span>
           </div>
           <div class="release-progress">
             <div class="progress-head">
@@ -268,6 +293,28 @@ const pendingApprovals = computed(
   color: #1264c5;
   font-size: 13px;
   text-decoration: none;
+}
+
+.frozen-note {
+  color: #0e7a58;
+  font-size: 11px;
+}
+
+.stale-alert {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 12px 16px 0;
+  padding: 10px 12px;
+  border: 1px solid #f2c4c0;
+  border-radius: 6px;
+  color: #a81f17;
+  background: #fef3f2;
+  font-size: 12px;
+}
+
+.stale-alert svg {
+  flex: none;
 }
 
 .health-list {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   AppIcon,
@@ -17,6 +18,20 @@ import { useGovernanceStore } from '@/stores/governance'
 
 const router = useRouter()
 const store = useGovernanceStore()
+
+const recoveryNotice = ref(store.recoveredOperations)
+watch(
+  () => store.recoveredOperations,
+  (operations) => {
+    recoveryNotice.value = operations
+  },
+  { deep: true },
+)
+const dismissRecovery = (): void => {
+  recoveryNotice.value = []
+}
+
+const conflictTip = computed(() => (store.lastConflictAt ? new Date(store.lastConflictAt).toLocaleTimeString('zh-CN') : ''))
 
 const navigation = [
   { label: '治理工作台', icon: ChartIcon, to: '/' },
@@ -69,8 +84,8 @@ const reset = (): void => {
       <div class="sidebar-foot">
         <HistoryIcon />
         <div>
-          <span>本地持久化</span>
-          <strong>当前版本 {{ store.data.currentVersion }}</strong>
+          <span>当前版本 {{ store.data.currentVersion }}</span>
+          <strong>修订号 r{{ store.data.headRevision }}</strong>
         </div>
       </div>
     </aside>
@@ -79,7 +94,7 @@ const reset = (): void => {
       <header class="topbar">
         <div>
           <strong>多端埋点事件治理与发布评审</strong>
-          <span>{{ store.data.events.length }} 个事件 · {{ store.data.dependencies.length }} 个下游依赖</span>
+          <span>{{ store.data.events.length }} 个事件 · {{ store.data.dependencies.length }} 个下游依赖 · 修订 r{{ store.data.headRevision }}</span>
         </div>
         <div class="topbar-actions">
           <span class="sync-state">
@@ -92,6 +107,14 @@ const reset = (): void => {
           </t-button>
         </div>
       </header>
+      <section v-if="recoveryNotice.length > 0" class="recovery-banner" @click="dismissRecovery">
+        <strong>检测到上次写入失败：已从完整候选恢复 {{ recoveryNotice.length }} 个未完成操作</strong>
+        <span>{{ recoveryNotice.map((item) => (item.type === 'publish' ? `发布 ${item.candidate?.version ?? ''}` : `回滚 ${item.releaseId ?? ''}`)).join('、') }}（修订 r{{ recoveryNotice[0]?.intendedRevision }}），点击关闭提示。</span>
+      </section>
+      <section v-else-if="conflictTip" class="conflict-banner">
+        <strong>并发修订提醒（{{ conflictTip }}）</strong>
+        <span>其他窗口已推进契约修订，本地迟到的旧修订提交被拒绝，页面已同步到最新修订。</span>
+      </section>
       <section class="content-shell">
         <RouterView />
       </section>
@@ -250,5 +273,29 @@ const reset = (): void => {
 .content-shell {
   max-width: 1560px;
   padding: 24px;
+}
+
+.recovery-banner,
+.conflict-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 16px 24px 0;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.recovery-banner {
+  color: #6b4c12;
+  border: 1px solid #e8d9b5;
+  background: #fdf6e3;
+}
+
+.conflict-banner {
+  color: #8a2018;
+  border: 1px solid #f2c4c0;
+  background: #fef3f2;
 }
 </style>

@@ -333,8 +333,12 @@ export const releaseReadiness = (
   release: ReleaseCandidate,
   issues: ValidationIssue[],
 ): number => {
-  const migrationTotal = release.migrationConfirmations.length
-  const migrationDone = release.migrationConfirmations.filter(
+  // 仅候选影响清单中的下游需要迁移确认；失效证据视为未完成
+  const scopedConfirmations = release.migrationConfirmations.filter((confirmation) =>
+    release.affectedDependencyIds.includes(confirmation.dependencyId),
+  )
+  const migrationTotal = scopedConfirmations.length
+  const migrationDone = scopedConfirmations.filter(
     (item) => item.status === 'confirmed',
   ).length
   const approvalTotal = release.approvals.length

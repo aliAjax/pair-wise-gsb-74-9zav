@@ -22,6 +22,7 @@ import type {
 } from '@/models/domain'
 import { createId } from '@/services/repository'
 import { useGovernanceStore } from '@/stores/governance'
+import { reportMutation } from '@/composables/useMutationResult'
 
 const store = useGovernanceStore()
 const queryClient = useQueryClient()
@@ -183,11 +184,12 @@ const saveEvent = async (): Promise<void> => {
     id: eventForm.id || createId('evt'),
     updatedAt: new Date().toISOString(),
   }
-  store.saveEvent(saved)
+  const result = store.saveEvent(saved)
+  if (!(await reportMutation(result))) return
   selectedId.value = saved.id
   eventEditorVisible.value = false
   await invalidate()
-  await MessagePlugin.success('事件契约已保存')
+  await MessagePlugin.success(`事件契约已保存（修订 r${store.data.headRevision}）`)
 }
 
 const openPropertyEditor = (property?: EventProperty): void => {
@@ -231,10 +233,11 @@ const saveProperty = async (): Promise<void> => {
     id: propertyForm.id || createId('prop'),
     eventId: selectedEvent.value.id,
   }
-  store.saveProperty(selectedEvent.value.id, saved)
+  const result = store.saveProperty(selectedEvent.value.id, saved)
+  if (!(await reportMutation(result))) return
   propertyEditorVisible.value = false
   await invalidate()
-  await MessagePlugin.success('属性已保存')
+  await MessagePlugin.success(`属性已保存（修订 r${store.data.headRevision}）`)
 }
 
 const openRuleEditor = (rule?: PlatformRule): void => {
@@ -262,26 +265,30 @@ const saveRule = async (): Promise<void> => {
     await MessagePlugin.error('平台触发时机和负责人不能为空')
     return
   }
-  store.savePlatformRule(selectedEvent.value.id, {
+  const result = store.savePlatformRule(selectedEvent.value.id, {
     ...structuredClone(platformForm),
     id: platformForm.id || createId('rule'),
     eventId: selectedEvent.value.id,
   })
+  if (!(await reportMutation(result))) return
   platformEditorVisible.value = false
   await invalidate()
-  await MessagePlugin.success('平台规则已保存')
+  await MessagePlugin.success(`平台规则已保存（修订 r${store.data.headRevision}）`)
 }
 
 const removeProperty = async (propertyId: string): Promise<void> => {
   if (!selectedEvent.value) return
-  store.deleteProperty(selectedEvent.value.id, propertyId)
+  const result = store.deleteProperty(selectedEvent.value.id, propertyId)
+  if (!(await reportMutation(result))) return
   await invalidate()
-  await MessagePlugin.warning('属性已标记删除，仍引用它的下游依赖会进入迁移清单')
+  await MessagePlugin.warning('属性已标记删除，仍引用它的下游旧迁移确认已失效，需要重新核对')
 }
 
 const toggleProperty = (row: EventProperty, value: boolean): void => {
   if (!selectedEvent.value) return
-  store.saveProperty(selectedEvent.value.id, { ...row, required: value })
+  void reportMutation(
+    store.saveProperty(selectedEvent.value.id, { ...row, required: value }),
+  )
 }
 
 const updateRequired = (row: EventProperty, value: unknown): void => {

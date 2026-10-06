@@ -7,6 +7,7 @@ import StatusTag from '@/components/StatusTag.vue'
 import type { DeprecationPlan } from '@/models/domain'
 import { createId } from '@/services/repository'
 import { useGovernanceStore } from '@/stores/governance'
+import { reportMutation } from '@/composables/useMutationResult'
 
 const store = useGovernanceStore()
 const editorVisible = ref(false)
@@ -76,7 +77,7 @@ const savePlan = async (): Promise<void> => {
     await MessagePlugin.error('停用日期必须晚于停采日期')
     return
   }
-  store.saveDeprecation({ ...structuredClone(form), id: form.id || createId('plan') })
+  if (!(await reportMutation(store.saveDeprecation({ ...structuredClone(form), id: form.id || createId('plan') })))) return
   editorVisible.value = false
   await MessagePlugin.success('废弃计划已保存')
 }
@@ -86,7 +87,7 @@ const advance = async (plan: DeprecationPlan): Promise<void> => {
   const index = sequence.indexOf(plan.status)
   const next = plan.status === 'cancelled' ? 'planned' : sequence[Math.min(index + 1, 3)]
   if (!next) return
-  store.saveDeprecation({ ...plan, status: next })
+  if (!(await reportMutation(store.saveDeprecation({ ...plan, status: next })))) return
   await MessagePlugin.success(`废弃计划已推进到 ${next}`)
 }
 </script>

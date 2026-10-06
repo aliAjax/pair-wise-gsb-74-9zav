@@ -12,6 +12,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useReleaseQuery, useReleasesQuery } from '@/composables/useGovernanceQueries'
+import { reportMutation } from '@/composables/useMutationResult'
 import type { ReleaseApproval } from '@/models/domain'
 import { releaseReadiness } from '@/services/selectors'
 import { useGovernanceStore } from '@/stores/governance'
@@ -33,6 +34,20 @@ const release = computed(
 )
 const releases = computed(() => releasesQuery.data.value ?? store.data.releases)
 const readiness = computed(() => (release.value ? releaseReadiness(release.value, store.issues) : 0))
+const gateIssueList = computed(() => (release.value ? store.gateIssues(release.value) : []))
+const staleConfirmations = computed(
+  () =>
+    release.value?.migrationConfirmations.filter((item) => item.status === 'invalidated') ?? [],
+)
+const staleApprovals = computed(
+  () => release.value?.approvals.filter((item) => item.status === 'invalidated') ?? [],
+)
+const revisionStale = computed(
+  () =>
+    Boolean(release.value) &&
+    (release.value!.staleReason?.scopeStale === true ||
+      release.value!.scopeRevision < store.data.headRevision),
+)
 
 const createVisible = ref(false)
 const migrationVisible = ref(false)
@@ -79,11 +94,16 @@ const createRelease = async (): Promise<void> => {
     await MessagePlugin.error('版本号、标题和事件范围不能为空')
     return
   }
-  const created = store.createRelease(createForm.version, createForm.title, createForm.eventIds)
+  const { result, release: created } = store.createRelease(
+    createForm.version,
+    createForm.title,
+    createForm.eventIds,
+  )
+  if (!(await reportMutation(result)) || !created) return
   releaseId.value = created.id
   createVisible.value = false
   await invalidate()
-  await MessagePlugin.success('发布候选已创建，已生成下游迁移清单')
+  await MessagePlugin.success(`发布候选已创建，基准修订 r${created.baseRevision}，已生成下游迁移清单`)
 }
 
 const openMigration = (confirmationId: string): void => {
@@ -91,6 +111,7 @@ const openMigration = (confirmationId: string): void => {
     (item) => item.id === confirmationId,
   )
   if (!confirmation) return
+  // 已失效的确认允许按当前修订重新核对；驳回后也可重新确认
   migrationForm.confirmationId = confirmationId
   migrationForm.reviewer = confirmation.reviewer
   migrationForm.note = confirmation.note
@@ -102,20 +123,22 @@ const confirmMigration = async (): Promise<void> => {
     await MessagePlugin.error('确认人和迁移说明不能为空')
     return
   }
-  store.confirmMigration(
+  const result = store.confirmMigration(
     release.value.id,
     migrationForm.confirmationId,
     migrationForm.reviewer,
     migrationForm.note,
   )
+  if (!(await reportMutation(result))) return
   migrationVisible.value = false
   await invalidate()
-  await MessagePlugin.success('下游迁移已确认')
+  await MessagePlugin.success(`下游迁移已按修订 r${store.data.headRevision} 重新确认`)
 }
 
 const openApproval = (approval: ReleaseApproval): void => {
   singleApproval.value = approval
-  approvalComment.value = approval.comment
+  // 失效后重新审批时不沿用旧意见
+  approvalComment.value = approval.status === 'invalidated' ? '' : approval.comment
   approvalVisible.value = true
 }
 
@@ -124,16 +147,21 @@ const submitApproval = async (status: ReleaseApproval['status']): Promise<void> 
     await MessagePlugin.error('审批意见不能为空')
     return
   }
-  store.updateApproval(
+  const result = store.updateApproval(
     release.value.id,
     singleApproval.value.role,
     status,
     singleApproval.value.actor,
     approvalComment.value,
   )
+  if (!(await reportMutation(result))) return
   approvalVisible.value = false
   await invalidate()
-  await MessagePlugin.success(status === 'approved' ? '审批已通过' : '审批已驳回')
+  await MessagePlugin.success(
+    status === 'approved'
+      ? `审批已按修订 r${store.data.headRevision} 通过`
+      : '审批已驳回',
+  )
 }
 
 const batchApprove = async (): Promise<void> => {
@@ -142,18 +170,21 @@ const batchApprove = async (): Promise<void> => {
     await MessagePlugin.error('请选择审批项并填写批量审批意见')
     return
   }
-  selectedApprovalIds.value.forEach((id) => {
+  for (const id of selectedApprovalIds.value) {
     const approval = release.value?.approvals.find((item) => item.id === id)
-    if (approval) {
-      store.updateApproval(
-        release.value!.id,
-        approval.role,
-        'approved',
-        approval.actor,
-        approvalComment.value,
-      )
+    if (!approval) continue
+    const result = store.updateApproval(
+      release.value!.id,
+      approval.role,
+      'approved',
+      approval.actor,
+      approvalComment.value,
+    )
+    if (!result.ok) {
+      await reportMutation(result)
+      break
     }
-  })
+  }
   selectedApprovalIds.value = []
   approvalComment.value = ''
   await invalidate()
@@ -162,12 +193,18 @@ const batchApprove = async (): Promise<void> => {
 
 const publish = async (): Promise<void> => {
   if (!release.value) return
-  if (!store.publishRelease(release.value.id)) {
-    await MessagePlugin.error('迁移确认或四角色审批尚未完成，当前不可发布')
-    return
-  }
+  const result = store.publishRelease(release.value.id)
+  if (!(await reportMutation(result))) return
   await invalidate()
-  await MessagePlugin.success('事件契约版本已发布')
+  await MessagePlugin.success(`事件契约已发布，冻结修订 r${release.value.frozenRevision ?? store.data.headRevision}`)
+}
+
+const syncScope = async (): Promise<void> => {
+  if (!release.value) return
+  const result = store.syncReleaseScope(release.value.id)
+  if (!(await reportMutation(result))) return
+  await invalidate()
+  await MessagePlugin.success('候选已同步当前修订，已失效的确认和审批仍需重新核对')
 }
 
 const downloadDiff = (): void => {
@@ -175,10 +212,33 @@ const downloadDiff = (): void => {
   const content = JSON.stringify(
     {
       release: release.value.version,
+      baseRevision: release.value.baseRevision,
+      scopeRevision: release.value.scopeRevision,
+      headRevision: store.data.headRevision,
+      frozenRevision: release.value.frozenRevision,
       events: release.value.eventIds.map(eventName),
       differences: release.value.differences,
       affectedDependencies: release.value.affectedDependencyIds.map(dependencyName),
-      migrationConfirmations: release.value.migrationConfirmations,
+      gateIssues: store.gateIssues(release.value),
+      migrationConfirmations: release.value.migrationConfirmations.map((confirmation) => ({
+        dependency: dependencyName(confirmation.dependencyId),
+        status: confirmation.status,
+        revision: confirmation.revision,
+        invalidatedRevision: confirmation.invalidatedRevision,
+        invalidatedReason: confirmation.invalidatedReason,
+        reviewer: confirmation.reviewer,
+        note: confirmation.note,
+      })),
+      approvals: release.value.approvals.map((approval) => ({
+        role: approval.role,
+        actor: approval.actor,
+        status: approval.status,
+        revision: approval.revision,
+        invalidatedRevision: approval.invalidatedRevision,
+        invalidatedReason: approval.invalidatedReason,
+        comment: approval.comment,
+      })),
+      frozenEvidence: release.value.frozenEvidence ?? null,
     },
     null,
     2,
@@ -187,7 +247,7 @@ const downloadDiff = (): void => {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = `${release.value.version}-contract-diff.json`
+  anchor.download = `${release.value.version}-r${release.value.scopeRevision}-contract-diff.json`
   anchor.click()
   URL.revokeObjectURL(url)
 }
@@ -237,8 +297,14 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
           <StatusTag :value="release.status" />
         </div>
         <div>
-          <span>标题</span>
-          <strong>{{ release.title }}</strong>
+          <span>修订号</span>
+          <strong>
+            基准 r{{ release.baseRevision }} / 范围 r{{ release.scopeRevision }}
+            <small v-if="revisionStale" class="stale-inline">当前已到 r{{ store.data.headRevision }}</small>
+          </strong>
+          <small v-if="release.frozenRevision" class="frozen-inline">
+            发布冻结 r{{ release.frozenRevision }}
+          </small>
         </div>
         <div>
           <span>事件范围</span>
@@ -256,6 +322,30 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
           发布契约
           <template #suffix><ChevronRightIcon /></template>
         </t-button>
+      </section>
+
+      <section v-if="release.staleReason?.scopeStale" class="panel sync-banner">
+        <div>
+          <strong>{{ release.staleReason.reason }}</strong>
+          <span>同步后会重新比较差异并补全新受影响下游；已失效的确认与审批不会自动恢复。</span>
+        </div>
+        <t-button theme="warning" @click="syncScope">同步当前修订</t-button>
+      </section>
+
+      <section v-if="gateIssueList.length > 0" class="panel stale-banner">
+        <div class="stale-banner-head">
+          <CloseCircleIcon />
+          <strong>当前修订下存在 {{ gateIssueList.length }} 项待重新核对，发布门禁未通过</strong>
+        </div>
+        <ul>
+          <li v-for="issue in gateIssueList" :key="`${issue.kind}-${issue.targetId}`">
+            <StatusTag
+              :value="issue.kind === 'stale_confirmation' || issue.kind === 'stale_approval' || issue.kind === 'scope_stale' ? 'invalidated' : 'pending'"
+            />
+            <strong>{{ issue.label }}</strong>
+            <span>{{ issue.reason }}</span>
+          </li>
+        </ul>
       </section>
 
       <div class="release-grid">
@@ -330,15 +420,26 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
             <div class="gate-row">
               <CheckCircleIcon
                 :class="{
-                  pending: release.migrationConfirmations.some((item) => item.status !== 'confirmed'),
+                  pending: release.migrationConfirmations.some(
+                    (item) =>
+                      release?.affectedDependencyIds.includes(item.dependencyId) &&
+                      item.status !== 'confirmed',
+                  ),
                 }"
               />
               <div>
                 <strong>下游迁移确认</strong>
                 <span>
                   {{
-                    release.migrationConfirmations.filter((item) => item.status === 'confirmed').length
-                  }}/{{ release.migrationConfirmations.length }} 已确认
+                    release.migrationConfirmations.filter(
+                      (item) =>
+                        release?.affectedDependencyIds.includes(item.dependencyId) &&
+                        item.status === 'confirmed',
+                    ).length
+                  }}/{{ release.affectedDependencyIds.length }} 已确认
+                  <em v-if="staleConfirmations.length > 0" class="stale-text">
+                    （{{ staleConfirmations.length }} 项已失效）
+                  </em>
                 </span>
               </div>
             </div>
@@ -353,6 +454,9 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
                     release.approvals.length
                   }}
                   已通过
+                  <em v-if="staleApprovals.length > 0" class="stale-text">
+                    （{{ staleApprovals.length }} 项已失效）
+                  </em>
                 </span>
               </div>
             </div>
@@ -365,6 +469,34 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
         </section>
       </div>
 
+      <section v-if="release.frozenEvidence" class="panel frozen-panel">
+        <div class="panel-header">
+          <h2 class="panel-title">发布冻结证据</h2>
+          <span class="muted">
+            冻结修订 r{{ release.frozenEvidence.revision }} ·
+            {{ new Date(release.frozenEvidence.frozenAt).toLocaleString('zh-CN') }}
+          </span>
+        </div>
+        <div class="frozen-grid">
+          <div>
+            <strong>迁移确认（{{ release.frozenEvidence.migrationConfirmations.length }}）</strong>
+            <ul>
+              <li v-for="item in release.frozenEvidence.migrationConfirmations" :key="item.dependencyId">
+                {{ dependencyName(item.dependencyId) }} · {{ item.reviewer }} · r{{ item.revision ?? '?' }}
+              </li>
+            </ul>
+          </div>
+          <div>
+            <strong>四角色审批（{{ release.frozenEvidence.approvals.length }}）</strong>
+            <ul>
+              <li v-for="item in release.frozenEvidence.approvals" :key="item.role">
+                {{ roleLabel(item.role) }} · {{ item.actor }} · r{{ item.revision ?? '?' }}
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
       <div class="review-columns">
         <section class="panel">
           <div class="panel-header">
@@ -375,6 +507,7 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
               v-for="confirmation in release.migrationConfirmations"
               :key="confirmation.id"
               class="migration-card"
+              :class="{ invalid: confirmation.status === 'invalidated' }"
             >
               <div>
                 <strong>{{ dependencyName(confirmation.dependencyId) }}</strong>
@@ -382,13 +515,21 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
               </div>
               <StatusTag :value="confirmation.status" />
               <p>{{ confirmation.note || '尚未填写迁移确认说明。' }}</p>
+              <dl v-if="confirmation.status === 'invalidated'" class="invalid-reason">
+                <dt>失效原因</dt>
+                <dd>{{ confirmation.invalidatedReason }}</dd>
+                <dt>失效修订</dt>
+                <dd>r{{ confirmation.invalidatedRevision }}（原确认基于 r{{ confirmation.revision ?? '?' }}）</dd>
+              </dl>
+              <small v-else-if="confirmation.status === 'confirmed'" class="evidence-revision">
+                确认基于修订 r{{ confirmation.revision ?? '?' }}
+              </small>
               <t-button
                 variant="outline"
                 size="small"
-                :disabled="confirmation.status === 'confirmed'"
                 @click="openMigration(confirmation.id)"
               >
-                确认迁移
+                {{ confirmation.status === 'invalidated' ? '按当前修订重新核对' : '确认迁移' }}
               </t-button>
             </article>
           </div>
@@ -399,7 +540,12 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
             <h2 class="panel-title">四角色审批</h2>
           </div>
           <div class="approval-list">
-            <label v-for="approval in release.approvals" :key="approval.id" class="approval-row">
+            <label
+              v-for="approval in release.approvals"
+              :key="approval.id"
+              class="approval-row"
+              :class="{ invalid: approval.status === 'invalidated' }"
+            >
               <t-checkbox
                 :value="selectedApprovalIds.includes(approval.id)"
                 :disabled="approval.status === 'approved'"
@@ -408,10 +554,16 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
               <div>
                 <strong>{{ roleLabel(approval.role) }}</strong>
                 <span>{{ approval.actor }} · {{ approval.comment || '待填写意见' }}</span>
+                <small v-if="approval.status === 'invalidated'" class="invalid-reason-text">
+                  {{ approval.invalidatedReason }}
+                </small>
+                <small v-else-if="approval.status === 'approved'" class="evidence-revision">
+                  审批基于修订 r{{ approval.revision ?? '?' }}
+                </small>
               </div>
               <StatusTag :value="approval.status" />
               <t-button variant="text" size="small" @click.prevent="openApproval(approval)">
-                审批
+                {{ approval.status === 'invalidated' ? '重新审批' : '审批' }}
               </t-button>
             </label>
           </div>
@@ -517,6 +669,137 @@ const setApprovalChecked = (approvalId: string, checked: unknown): void => {
   border: 1px solid #dfe3e8;
   border-radius: 6px;
   background: #dfe3e8;
+}
+
+.stale-inline,
+.frozen-inline {
+  display: block;
+  color: #b42318;
+  font-size: 11px;
+}
+
+.frozen-inline {
+  color: #0e7a58;
+}
+
+.stale-banner {
+  margin-top: 16px;
+  border-color: #f2c4c0;
+  background: #fff7f6;
+}
+
+.sync-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  border-color: #e8d9b5;
+  background: #fdf8ec;
+}
+
+.sync-banner div {
+  display: grid;
+  gap: 4px;
+}
+
+.sync-banner strong {
+  color: #8a6116;
+  font-size: 12px;
+}
+
+.sync-banner span {
+  color: #8f7c52;
+  font-size: 11px;
+}
+
+.stale-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: #a81f17;
+}
+
+.stale-banner-head svg {
+  color: #c44034;
+}
+
+.stale-banner ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stale-banner li {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.stale-banner li span {
+  color: #7a5a56;
+}
+
+.stale-text {
+  color: #b42318 !important;
+  font-style: normal;
+}
+
+.migration-card.invalid,
+.approval-row.invalid {
+  background: #fff7f6;
+}
+
+.invalid-reason {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid #d24a3e;
+  background: #fdecea;
+  font-size: 11px;
+}
+
+.invalid-reason dt {
+  color: #a81f17;
+  font-weight: 600;
+}
+
+.invalid-reason dd {
+  margin: 0;
+  color: #6b4c48;
+}
+
+.invalid-reason-text,
+.evidence-revision {
+  color: #b42318;
+  font-size: 10px;
+}
+
+.evidence-revision {
+  color: #0e7a58;
+}
+
+.frozen-panel .frozen-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 14px 16px;
+}
+
+.frozen-grid ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #596579;
+  font-size: 12px;
+  line-height: 1.9;
 }
 
 .release-overview > div,
